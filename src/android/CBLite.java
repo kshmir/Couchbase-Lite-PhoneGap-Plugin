@@ -9,7 +9,9 @@ import org.apache.cordova.CordovaInterface;
 import org.json.JSONArray;
 
 import com.couchbase.lite.android.AndroidContext;
+import com.couchbase.lite.replicator.Replication;
 import com.couchbase.lite.Manager;
+import com.couchbase.lite.Database;
 import com.couchbase.lite.listener.LiteListener;
 import com.couchbase.lite.listener.LiteServlet;
 import com.couchbase.lite.listener.Credentials;
@@ -17,16 +19,28 @@ import com.couchbase.lite.router.URLStreamHandlerFactory;
 import com.couchbase.lite.View;
 import com.couchbase.lite.javascript.JavaScriptViewCompiler;
 import com.couchbase.lite.util.Log;
+import java.util.List;
+import java.util.ArrayList;
+
+import java.net.MalformedURLException;
+import java.net.URL;
 
 import java.io.IOException;
 import java.io.File;
 
-public class CBLite extends CordovaPlugin {
+public class CBLite extends CordovaPlugin implements Replication.ChangeListener {
+
+	public static String TAG = "SyncGateway";
 
 	private static final int DEFAULT_LISTEN_PORT = 5984;
+	private static final String DATABASE_NAME = "contacts";
+	public static final String SYNC_URL = "http://192.168.1.104:4984/contacts";
 	private boolean initFailed = false;
 	private int listenPort;
-    private Credentials allowedCredentials;
+  private Credentials allowedCredentials;
+  private boolean inicializado = false;
+  private Manager manager;
+  private Database database;
 
 	/**
 	 * Constructor.
@@ -47,15 +61,21 @@ public class CBLite extends CordovaPlugin {
 	private void initCBLite() {
 		try {
 
-		    allowedCredentials = new Credentials();
+		   allowedCredentials = new Credentials("admin", "admin");
 
 			URLStreamHandlerFactory.registerSelfIgnoreError();
 
 			View.setCompiler(new JavaScriptViewCompiler());
 
-			Manager server = startCBLite(this.cordova.getActivity());
+			this.manager = startCBLite(this.cordova.getActivity());
 
-			listenPort = startCBLListener(DEFAULT_LISTEN_PORT, server, allowedCredentials);
+			this.database = this.manager.getDatabase(DATABASE_NAME);
+
+			startSync();
+
+			listenPort = startCBLListener(DEFAULT_LISTEN_PORT, this.manager, allowedCredentials);
+
+			inicializado = true;
 
 			System.out.println("initCBLite() completed successfully");
 
@@ -100,7 +120,7 @@ public class CBLite extends CordovaPlugin {
 	protected Manager startCBLite(Context context) {
 		Manager manager;
 		try {
-		        Manager.enableLogging(Log.TAG, Log.VERBOSE);
+		  Manager.enableLogging(Log.TAG, Log.VERBOSE);
 			Manager.enableLogging(Log.TAG_SYNC, Log.VERBOSE);
 			Manager.enableLogging(Log.TAG_QUERY, Log.VERBOSE);
 			Manager.enableLogging(Log.TAG_VIEW, Log.VERBOSE);
@@ -119,8 +139,52 @@ public class CBLite extends CordovaPlugin {
 		return manager;
 	}
 
-	private int startCBLListener(int listenPort, Manager manager, Credentials allowedCredentials) {
+	private void startSync() {
 
+    URL syncUrl;
+    try {
+        syncUrl = new URL(SYNC_URL);
+    } catch (MalformedURLException e) {
+        throw new RuntimeException(e);
+    }
+
+    Replication pullReplication = this.database.createPullReplication(syncUrl);
+    pullReplication.setContinuous(true);
+
+    Replication pushReplication = this.database.createPushReplication(syncUrl);
+    pushReplication.setContinuous(true);
+
+    pullReplication.start();
+    pushReplication.start();
+
+    pullReplication.addChangeListener(this);
+    pushReplication.addChangeListener(this);
+
+  }
+
+  @Override
+    public void changed(Replication.ChangeEvent event) {
+
+      Replication replication = event.getSource();
+      Log.d(TAG, "Replication : " + replication + " changed.");
+      if (!replication.isRunning()) {
+        String msg = String.format("Replicator %s not running", replication);
+        Log.d(TAG, msg);
+      }
+      else {
+        int processed = replication.getCompletedChangesCount();
+        int total = replication.getChangesCount();
+        String msg = String.format("Replicator processed %d / %d", processed, total);
+        Log.d(TAG, msg);
+      }
+
+      /*if (event.getError() != null) {
+        showError("Sync error", event.getError());
+      }*/
+
+    }
+
+	private int startCBLListener(int listenPort, Manager manager, Credentials allowedCredentials) {
 		LiteListener listener = new LiteListener(manager, listenPort, allowedCredentials);
 		int boundPort = listener.getListenPort();
 		Thread thread = new Thread(listener);
@@ -136,6 +200,5 @@ public class CBLite extends CordovaPlugin {
 	public void onPause(boolean multitasking) {
 		System.out.println("CBLite.onPause() called");
 	}
-
 
 }
